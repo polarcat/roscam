@@ -7,6 +7,7 @@
 #include "camera.h"
 #include "sensor_msgs/image_encodings.hpp"
 #include "sensor_msgs/msg/image.hpp"
+#include "rclcpp/qos.hpp"
 
 #ifndef LOG_TAG
 #define LOG_TAG "roscam"
@@ -97,6 +98,7 @@ private:
 	enum pixel_format format_;
 	const char *dev_;
 	std::string topic_;
+	rclcpp::QoS qos_ = rclcpp::QoS(1);
 };
 
 roscam::~roscam()
@@ -158,6 +160,10 @@ roscam::roscam(): Node(LOG_TAG)
 	}
 
 	ii("Topic %s geom (%u %u)", topic_.c_str(), w_, h_);
+
+	qos_.durability_volatile();
+	qos_.keep_last(1);
+	qos_.reliable();
 }
 
 void roscam::create_jpg_stream()
@@ -196,7 +202,7 @@ void roscam::publish_jpg_image()
 
 		if (!stream_->start()) {
 			exit(1);
-		} else if (!(jpg = create_publisher<image_t>(topic_, 10))) {
+		} else if (!(jpg = create_publisher<image_t>(topic_, qos_))) {
 			ee("Failed to create publisher for topic '%s'",
 			 topic_.c_str());
 			exit(1);
@@ -256,7 +262,7 @@ void roscam::publish_rgb_image()
 
 		if (!stream_->start()) {
 			exit(1);
-		} else if (!(rgb = create_publisher<image_t>(topic_, 10))) {
+		} else if (!(rgb = create_publisher<image_t>(topic_, qos_))) {
 			ee("Failed to create publisher for topic '%s'",
 			 topic_.c_str());
 			exit(1);
