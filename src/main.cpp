@@ -14,6 +14,16 @@
 #endif
 #include "roslog.h"
 
+#define STBI_NO_PNG
+#define STBI_NO_BMP
+#define STBI_NO_GIF
+#define STBI_NO_PSD
+#define STBI_NO_PIC
+#define STBI_NO_PNM
+#define STBI_NO_TGA
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb/stb_image.h>
+
 namespace {
 
 #ifdef PRINT_FPS
@@ -40,6 +50,39 @@ using image_t = sensor_msgs::msg::Image;
 
 static constexpr uint8_t RGB_PLANES = 3;
 static constexpr uint8_t MAX_SCALE_FACTOR = 5;
+
+static inline void reset_image(camera::image *out)
+{
+	if (out->data) {
+		free(out->data);
+		out->data = nullptr;
+		out->bytes = 0;
+	}
+}
+
+static bool decode_image(camera::image *in, camera::image *out)
+{
+	int n = 0;
+	int w = 0;
+	int h = 0;
+
+	out->data = stbi_load_from_memory(in->data, in->bytes, &w, &h, &n,
+	 RGB_PLANES);
+
+	if (n != RGB_PLANES) {
+		ee("only RGB color scheme is supported, n=%d\n", n);
+		reset_image(out);
+		return false;
+	} else if (!w || !h) {
+		ee("invalid decoded image size wh (%d %d)\n", w, h);
+		reset_image(out);
+		return false;
+	}
+
+	out->w = static_cast<uint16_t>(w);
+	out->h = static_cast<uint16_t>(h);
+	return true;
+}
 
 inline void copy_rgb8(camera::image *in, image_t *out, uint8_t scale)
 {
@@ -89,6 +132,7 @@ private:
 	void publish_rgb_image();
 	void create_jpg_stream();
 	void publish_jpg_image();
+	void publish_decoded_image();
 	std::thread job_;
 	bool done_ = false;
 	camera::stream_ptr stream_;
@@ -154,6 +198,9 @@ roscam::roscam(): Node(LOG_TAG)
 	if (format_ == PIXEL_FMT_RGB8) {
 		topic_ = std::string(dev_) + "/image_raw";
 		publish_rgb_image();
+	} else if (format_ == PIXEL_FMT_JPG && getenv("CAMERA_DECODE")) {
+		topic_ = std::string(dev_) + "/image_raw";
+		publish_decoded_image();
 	} else {
 		topic_ = std::string(dev_) + "/image_jpg";
 		publish_jpg_image();
@@ -190,6 +237,48 @@ void roscam::create_jpg_stream()
 			exit(1);
 		}
 	}
+}
+
+void roscam::publish_decoded_image()
+{
+	create_jpg_stream();
+	job_ = std::thread {
+	 [=]()->void {
+		camera::image in;
+		rclcpp::Publisher<image_t>::SharedPtr rgb;
+
+		if (!stream_->start()) {
+			exit(1);
+		} else if (!(rgb = create_publisher<image_t>(topic_, qos_))) {
+			ee("Failed to create publisher for topic '%s'",
+			 topic_.c_str());
+			exit(1);
+		}
+
+		while (!done_) {
+			stream_->get_frame(in);
+			camera::image decoded;
+
+			if (!decode_image(&in, &decoded)) {
+				stream_->put_frame();
+				continue;
+			}
+
+			image_t out;
+			out.encoding = sensor_msgs::image_encodings::RGB8;
+			out.header.stamp = rostime(in.time);
+			out.header.frame_id = std::to_string(in.id);
+			out.width = decoded.w;
+			out.height = decoded.h;
+			out.step = out.width;
+			out.data.resize(out.width * out.height * RGB_PLANES);
+			memcpy(out.data.data(), decoded.data, out.data.size());
+			stream_->put_frame();
+			rgb->publish(std::move(out));
+			print_fps(in);
+			reset_image(&decoded);
+		}
+	}};
 }
 
 void roscam::publish_jpg_image()
