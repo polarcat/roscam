@@ -23,7 +23,8 @@ Recognized environment variables (with examples)
 	CAMERA_GEOM=1920x1080	# desired image size (if supported)
 	CAMERA_FPS=30 		# desired framerate (if supported)
 	CAMERA_SCALE=-2		# scale down factor (-2..-5)
-	CAMERA_JPG=1			# capture jpeg images if supported by camera (undefine to disable)
+	CAMERA_JPG=1		# capture jpeg images if supported by camera (undefine to disable)
+	CAMERA_DECODE=1		# decode captured jpeg images (depends on CAMEAR_JPG)
 
 ### Examples
 
