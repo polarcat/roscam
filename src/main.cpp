@@ -26,6 +26,20 @@
 
 namespace {
 
+constexpr uint8_t JPG_ON = (1 << 0);
+constexpr uint8_t RGB_ON = (1 << 1);
+constexpr uint8_t QOS_ON = (1 << 2);
+
+struct params {
+	const char *dev = nullptr;
+	const char *topic = nullptr;
+	uint16_t w = 640;
+	uint16_t h = 480;
+	float fps = 30.;
+	bool qos = false;
+	uint8_t flags = RGB_ON;
+};
+
 #ifdef PRINT_FPS
 inline void print_fps(struct camera::image &img)
 {
@@ -124,7 +138,7 @@ class roscam: public rclcpp::Node
 		PIXEL_FMT_JPG,
 	};
 public:
-	roscam();
+	roscam(std::unique_ptr<struct params>);
 	~roscam();
 
 private:
@@ -154,63 +168,32 @@ roscam::~roscam()
 	ii("Stopped");
 }
 
-roscam::roscam(): Node(LOG_TAG)
+roscam::roscam(std::unique_ptr<struct params> p): Node(LOG_TAG)
 {
-	const char *geom;
-	const char *geom_h;
-	const char *scale;
-	const char *format;
+	std::unique_ptr<struct params> params = std::move(p);
 
-	if (!(dev_ = getenv("CAMERA_DEV"))) {
-		ee("CAMERA_DEV env variable is not set; e.g. CAMERA_DEV=/dev/video0");
-		exit(1);
-	} else if (!(geom = getenv("CAMERA_GEOM"))) {
-		ee("CAMERA_GEOM env variable is not set; e.g. CAMERA_GEOM=1920x1080");
-		exit(1);
-	} else if (!(geom_h = strchr(geom, 'x'))) {
-		ee("Malformed CAMERA_GEOM env variable; e.g. CAMERA_GEOM=1920x1080");
-		exit(1);
-	} else if ((scale = getenv("CAMERA_SCALE"))) {
-		scale_ = atoi(scale);
-		if (scale_ > 1) {
-			ee("Upscaling is not supported, e.g. try CAMERA_SCALE=%d",
-			 -scale_);
-			exit(1);
-		} else if (!scale_) {
-			scale_ = 1;
-		} else if (abs(scale_) > MAX_SCALE_FACTOR) {
-			scale_ = MAX_SCALE_FACTOR;
-		}
-	}
+	dev_ = params->dev;
+	topic_ = params->topic;
+	w_ = params->w;
+	h_ = params->h;
 
-	if ((format = getenv("CAMERA_JPG"))) {
-		format_ = PIXEL_FMT_JPG;
-		scale_ = 1;
-	} else {
-		format_ = PIXEL_FMT_RGB8;
-	}
+	ii("Open camera %s hinted geom (%u %u)", dev_, w_, h_);
 
-	w_ = atoi(geom);
-	h_ = atoi(++geom_h);
-	ii("Open camera %s geom (%u %u) scale factor %d", dev_, w_, h_, scale_);
-	scale_ = abs(scale_);
-
-	if (format_ == PIXEL_FMT_RGB8) {
-		topic_ = std::string(dev_) + "/image_raw";
-		publish_rgb_image();
-	} else if (format_ == PIXEL_FMT_JPG && getenv("CAMERA_DECODE")) {
-		topic_ = std::string(dev_) + "/image_raw";
+	if ((params->flags & (JPG_ON | RGB_ON)) == (JPG_ON | RGB_ON))
 		publish_decoded_image();
-	} else {
-		topic_ = std::string(dev_) + "/image_jpg";
+	else if (params->flags & RGB_ON)
+		publish_rgb_image();
+	else
 		publish_jpg_image();
+
+	ii("Topic '%s' geom (%u %u)", topic_.c_str(), w_, h_);
+
+	if (params->flags & QOS_ON) {
+		ii("Qos: volatile, reliable, depth=1\n");
+		qos_.durability_volatile();
+		qos_.keep_last(1);
+		qos_.reliable();
 	}
-
-	ii("Topic %s geom (%u %u)", topic_.c_str(), w_, h_);
-
-	qos_.durability_volatile();
-	qos_.keep_last(1);
-	qos_.reliable();
 }
 
 void roscam::create_jpg_stream()
@@ -375,10 +358,78 @@ void roscam::publish_rgb_image()
 	}};
 }
 
+static void help(const char *name)
+{
+	printf("Usage: %s <options>\n"
+	 "Options:\n"
+	 "\033[2m"
+	 " -d, --dev <str>     video device, e.g. /dev/video0\n"
+	 " -t, --topic <str>   topic name\n"
+	 " -p, --params <str>  stream hints (WxH@fps), e.g. 1920x1080@30\n"
+	 " -j, --jpg           select mjpeg input stream\n"
+	 " -r, --rgb           publish rgb image (can be combined with -j)\n"
+	 " -q, --qos           apply hardcoded QoS configuration\n"
+	 "\033[0m"
+	 "Examples: %s -d /dev/video0 -t /camera -p 1920x1080@30 -j -r\n",
+	 name, name);
+}
+
+static int opt(const char *arg, const char *args, const char *argl)
+{
+	return (strcmp(arg, args) == 0 || strcmp(arg, argl) == 0);
+}
+
+static void init(int argc, char *argv[], struct params *params)
+{
+	const char *geom_w;
+	const char *geom_h;
+	const char *fps;
+	const char *arg;
+
+	for (uint8_t i = 0; i < argc; ++i) {
+		arg = argv[i];
+		if (opt(arg, "-d", "--dev")) {
+			i++;
+			params->dev = argv[i];
+		} else if (opt(arg, "-t", "--topic")) {
+			i++;
+			params->topic = argv[i];
+		} else if (opt(arg, "-p", "--params")) {
+			i++;
+			if (!(geom_w = argv[i])) {
+				ee("malformed width, geom string e.g. 1920x1080\n");
+				exit(1);
+			} else if (!(geom_h = strchr(geom_w, 'x'))) {
+				ee("malformed height, geom string e.g. 1920x1080\n");
+				exit(1);
+			} else if ((fps = strchr(geom_h, '@'))) {
+				params->fps = atoi(++fps);
+			}
+
+			params->w = atoi(geom_w);
+			params->h = atoi(++geom_h);
+		} else if (opt(arg, "-j", "--jpg")) {
+			params->flags |= JPG_ON;
+		} else if (opt(arg, "-r", "--rgb")) {
+			params->flags |= RGB_ON;
+		} else if (opt(arg, "-q", "--qos")) {
+			params->flags |= QOS_ON;
+		}
+	}
+
+	if (!params->dev || !params->topic) {
+		help(argv[0]);
+		exit(1);
+	}
+}
+
 int main(int argc, char *argv[])
 {
+	std::unique_ptr<struct params> params;
+	params = std::make_unique<struct params>();
+	init(argc, argv, params.get());
 	rclcpp::init(argc, argv);
-	rclcpp::spin(std::make_shared<roscam>());
+	rclcpp::spin(std::make_shared<roscam>(std::move(params)));
 	rclcpp::shutdown();
 	return 0;
 }
